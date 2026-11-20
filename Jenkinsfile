@@ -1,58 +1,51 @@
-// Stage 3: Login to Docker Hub
+
+pipeline {
+    agent any
+
+    environment {
+        DOCKER_IMAGE = 'naveen04jan/my-python-app3'
+        IMAGE_TAG = 'latest'
+        CONTAINER_NAME = 'my-python-container'
+        APP_PORT = '5000'
+    }
+
+    stages {
+
+        stage('Docker Environment Check') {
+            steps {
+                powershell '''
+                    Write-Host "Checking Docker..."
+                    whoami
+                    docker --version
+                    docker info
+                '''
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                bat 'docker build -t %DOCKER_IMAGE%:%IMAGE_TAG% .'
+            }
+        }
+
         stage('Login to DockerHub') {
             steps {
-                withEnv(["DOCKER_CONFIG=${env.WORKSPACE}\\.docker"]) {
-                    withCredentials([
-                        usernamePassword(
-                            credentialsId: 'dockerhub-login',
-                            usernameVariable: 'DOCKER_USER',
-                            passwordVariable: 'DOCKER_TOKEN'
-                        )
-                    ]) {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'dockerhub-login',
+                        usernameVariable: 'DOCKER_USER',
+                        passwordVariable: 'DOCKER_TOKEN'
+                    )
+                ]) {
+                    withEnv(["DOCKER_CONFIG=${env.WORKSPACE}\\.docker"]) {
                         powershell '''
                             $ErrorActionPreference = "Stop"
 
-                            New-Item -ItemType Directory `
-                                -Force -Path $env:DOCKER_CONFIG | Out-Null
+                            New-Item -ItemType Directory -Force -Path $env:DOCKER_CONFIG | Out-Null
 
-                            $configPath = Join-Path $env:DOCKER_CONFIG "config.json"
-                            '{"auths":{}}' | Set-Content -Path $configPath -Encoding ASCII
+                            $env:DOCKER_TOKEN.Trim() | docker --config $env:DOCKER_CONFIG login -u $env:DOCKER_USER --password-stdin
 
-                            $cleanUser = $env:DOCKER_USER.Trim()
-                            $cleanToken = $env:DOCKER_TOKEN.Trim()
-
-                            if ([string]::IsNullOrWhiteSpace($cleanUser) -or [string]::IsNullOrWhiteSpace($cleanToken)) {
-                                throw "DOCKER_USER or DOCKER_TOKEN is empty"
-                            }
-
-                            Write-Host "Logging in as user length: $($cleanUser.Length)"
-
-                            $psi = New-Object System.Diagnostics.ProcessStartInfo
-                            $psi.FileName = "docker.exe"
-                            $psi.Arguments = "--config `"$env:DOCKER_CONFIG`" login -u `"$cleanUser`" --password-stdin"
-                            $psi.UseShellExecute = $false
-                            $psi.RedirectStandardInput = $true
-                            $psi.RedirectStandardOutput = $true
-                            $psi.RedirectStandardError = $true
-                            $psi.CreateNoWindow = $true
-
-                            $p = New-Object System.Diagnostics.Process
-                            $p.StartInfo = $psi
-
-                            [void]$p.Start()
-
-                            $bytes = [System.Text.Encoding]::ASCII.GetBytes($cleanToken + "`n")
-                            $p.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
-                            $p.StandardInput.Close()
-
-                            $output = $p.StandardOutput.ReadToEnd()
-                            $errorOutput = $p.StandardError.ReadToEnd()
-                            $p.WaitForExit()
-
-                            Write-Host $output
-
-                            if ($p.ExitCode -ne 0) {
-                                Write-Host $errorOutput
+                            if ($LASTEXITCODE -ne 0) {
                                 throw "DockerHub login failed"
                             }
 
@@ -62,3 +55,51 @@
                 }
             }
         }
+
+        stage('Push Docker Image') {
+            steps {
+                withEnv(["DOCKER_CONFIG=${env.WORKSPACE}\\.docker"]) {
+                    bat 'docker push %DOCKER_IMAGE%:%IMAGE_TAG%'
+                }
+            }
+        }
+
+        stage('Deploy Container') {
+            steps {
+                withEnv(["DOCKER_CONFIG=${env.WORKSPACE}\\.docker"]) {
+                    bat '''
+                        docker stop %CONTAINER_NAME% 2>NUL
+                        docker rm %CONTAINER_NAME% 2>NUL
+
+                        docker run -d ^
+                            --name %CONTAINER_NAME% ^
+                            -p %APP_PORT%:%APP_PORT% ^
+                            %DOCKER_IMAGE%:%IMAGE_TAG%
+
+                        docker ps
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'CI/CD Pipeline completed successfully!'
+            echo 'Docker image pushed and application deployed.'
+        }
+
+        failure {
+            echo 'CI/CD Pipeline failed. Check Console Output.'
+        }
+
+        always {
+            bat '''
+                if exist "%WORKSPACE%\\.docker" (
+                    rmdir /s /q "%WORKSPACE%\\.docker"
+                )
+            '''
+            echo 'Pipeline execution completed.'
+        }
+    }
+}
